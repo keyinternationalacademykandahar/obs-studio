@@ -308,12 +308,13 @@ static void stop_capture(struct game_capture *gc)
 		gc->texture = NULL;
 	}
 
+	if (gc->active)
+		info("capture stopped");
+
 	gc->copy_texture = NULL;
 	gc->wait_for_target_startup = false;
 	gc->active = false;
 	gc->capturing = false;
-
-	info("capture stopped");
 
 	if (gc->retrying)
 		gc->retrying--;
