@@ -35,8 +35,7 @@ typedef OBJECT_ATTRIBUTES *POBJECT_ATTRIBUTES;
 
 typedef void (WINAPI *RTLINITUNICODESTRINGFUNC)(PCUNICODE_STRING pstr, const wchar_t *lpstrName);
 typedef NTSTATUS (WINAPI *NTOPENFUNC)(PHANDLE phandle, ACCESS_MASK access, POBJECT_ATTRIBUTES objattr);
-
-#define OBJ_CASE_INSENSITIVE 0x00000040L
+typedef ULONG (WINAPI *RTLNTSTATUSTODOSERRORFUNC)(NTSTATUS status);
 
 static FARPROC get_nt_func(const char *name)
 {
@@ -48,6 +47,21 @@ static FARPROC get_nt_func(const char *name)
 	}
 
 	return GetProcAddress(ntdll, name);
+}
+
+static void nt_set_last_error(NTSTATUS status)
+{
+	static bool initialized = false;
+	static RTLNTSTATUSTODOSERRORFUNC func = NULL;
+
+	if (!initialized) {
+		func = (RTLNTSTATUSTODOSERRORFUNC)get_nt_func(
+				"RtlNtStatusToDosError");
+		initialized = true;
+	}
+
+	if (func)
+		SetLastError(func(status));
 }
 
 static void rtl_init_str(UNICODE_STRING *unistr, const wchar_t *str)
@@ -89,6 +103,7 @@ static HANDLE func_name(const wchar_t *name) \
 	status = open(&handle, access, &attr); \
 	if (NT_SUCCESS(status)) \
 		return handle; \
+	nt_set_last_error(status); \
 	return NULL; \
 }
 

@@ -1,6 +1,6 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include <d3d11.h>
-#include <dxgi.h>
+#include <dxgi1_2.h>
 
 #include "dxgi-helpers.hpp"
 #include "graphics-hook.h"
@@ -213,6 +213,61 @@ static bool create_d3d11_tex(uint32_t cx, uint32_t cy,
 	return true;
 }
 
+class core_win_interop : public IUnknown {
+public:
+	virtual HRESULT STDMETHODCALLTYPE unused(bool val)=0;
+	virtual HRESULT STDMETHODCALLTYPE get_hwnd(HWND *hwnd)=0;
+};
+
+static const IID core_win_interop_iid =
+{0x45D64A29, 0xA63E, 0x4CB6, {0xB4, 0x98, 0x57, 0x81, 0xD2, 0x98, 0xCB, 0x4F}};
+static const IID core_win_iid =
+{0x79B9D5F2, 0x879E, 0x4B89, {0xB7, 0x98, 0x79, 0xE4, 0x75, 0x98, 0x03, 0x0C}};
+
+static HWND get_actual_window_handle(IDXGISwapChain *swap)
+{
+	core_win_interop *interop;
+	IDXGISwapChain1 *swap1;
+	IUnknown *core_window;
+	HWND hwnd = NULL;
+	HRESULT hr;
+
+	hr = swap->QueryInterface(__uuidof(IDXGISwapChain1),
+			(void**)&swap1);
+	if (FAILED(hr)) {
+		hlog_hr("no swapchain1 interface", hr);
+		return NULL;
+	}
+
+	hr = swap1->GetHwnd(&hwnd);
+	if (SUCCEEDED(hr)) {
+		goto cleanup;
+	} else {
+		hlog_hr("no hwnd either", hr);
+	}
+
+	hr = swap1->GetCoreWindow(core_win_iid, (void**)&core_window);
+	if (FAILED(hr)) {
+		hlog_hr("can't get fucking shitty ass core window fuck you",
+				hr);
+		goto cleanup;
+	}
+
+	hr = core_window->QueryInterface(core_win_interop_iid, (void**)&interop);
+	if (SUCCEEDED(hr)) {
+		hr = interop->get_hwnd(&hwnd);
+		if (FAILED(hr)) {
+			hlog_hr("why.", hr);
+		}
+	} else {
+		hlog_hr("no way to query it from the main core window?", hr);
+	}
+
+cleanup:
+	swap1->Release();
+	return hwnd;
+}
+
 static inline bool d3d11_init_format(IDXGISwapChain *swap, HWND &window)
 {
 	DXGI_SWAP_CHAIN_DESC desc;
@@ -224,11 +279,19 @@ static inline bool d3d11_init_format(IDXGISwapChain *swap, HWND &window)
 		return false;
 	}
 
+	if (!desc.OutputWindow) {
+		desc.OutputWindow = get_actual_window_handle(swap);
+	}
+
 	data.format = fix_dxgi_format(desc.BufferDesc.Format);
 	data.multisampled = desc.SampleDesc.Count > 1;
 	window = desc.OutputWindow;
 	data.base_cx = desc.BufferDesc.Width;
 	data.base_cy = desc.BufferDesc.Height;
+
+	wchar_t temp[60];
+	_snwprintf(temp, 60, L"window handle: %llx\n", (uint64_t)window);
+	OutputDebugStringW(temp);
 
 	if (data.using_scale) {
 		data.cx = global_hook_info->cx;
@@ -821,9 +884,11 @@ void d3d11_capture(void *swap_ptr, void *backbuffer_ptr)
 
 	HRESULT hr;
 	if (capture_should_stop()) {
+		hlog("Capture Should Stop!");
 		d3d11_free();
 	}
 	if (capture_should_init()) {
+		hlog("Capture Should Init!");
 		d3d11_init(swap);
 	}
 	if (capture_ready()) {

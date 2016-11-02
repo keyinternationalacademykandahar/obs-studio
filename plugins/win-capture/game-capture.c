@@ -147,6 +147,7 @@ struct game_capture {
 	HANDLE                        target_process;
 	HANDLE                        texture_mutexes[2];
 	wchar_t                       *app_sid;
+	int                           retrying;
 
 	union {
 		struct {
@@ -170,30 +171,44 @@ static inline bool use_anticheat(struct game_capture *gc)
 }
 
 static inline HANDLE open_mutex_plus_id(struct game_capture *gc,
-		const wchar_t *name)
+		const wchar_t *name, DWORD id)
 {
 	wchar_t new_name[64];
-	_snwprintf(new_name, 64, L"%s%lu", name, gc->process_id);
+	_snwprintf(new_name, 64, L"%s%lu", name, id);
 	return gc->is_app
 		? open_app_mutex(gc->app_sid, new_name)
 		: open_mutex(new_name);
 }
 
-static inline HANDLE open_event_plus_id(struct game_capture *gc,
+static inline HANDLE open_mutex_gc(struct game_capture *gc,
 		const wchar_t *name)
 {
+	return open_mutex_plus_id(gc, name, gc->process_id);
+}
+
+static inline HANDLE open_event_plus_id(struct game_capture *gc,
+		const wchar_t *name, DWORD id)
+{
 	wchar_t new_name[64];
-	_snwprintf(new_name, 64, L"%s%lu", name, gc->process_id);
+	_snwprintf(new_name, 64, L"%s%lu", name, id);
 	return gc->is_app
 		? open_app_event(gc->app_sid, new_name)
 		: open_event(new_name);
 }
 
-static inline HANDLE open_map_plus_id(struct game_capture *gc,
+static inline HANDLE open_event_gc(struct game_capture *gc,
 		const wchar_t *name)
 {
+	return open_event_plus_id(gc, name, gc->process_id);
+}
+
+static inline HANDLE open_map_plus_id(struct game_capture *gc,
+		const wchar_t *name, DWORD id)
+{
 	wchar_t new_name[64];
-	_snwprintf(new_name, 64, L"%s%lu", name, gc->process_id);
+	_snwprintf(new_name, 64, L"%s%lu", name, id);
+
+	debug("map id: %S", new_name);
 
 	return gc->is_app
 		? open_app_map(gc->app_sid, new_name)
@@ -202,7 +217,7 @@ static inline HANDLE open_map_plus_id(struct game_capture *gc,
 
 static inline HANDLE open_hook_info(struct game_capture *gc)
 {
-	return open_map_plus_id(gc, SHMEM_HOOK_INFO);
+	return open_map_plus_id(gc, SHMEM_HOOK_INFO, gc->process_id);
 }
 
 static inline enum gs_color_format convert_format(uint32_t format)
@@ -299,6 +314,9 @@ static void stop_capture(struct game_capture *gc)
 	gc->capturing = false;
 
 	info("capture stopped");
+
+	if (gc->retrying)
+		gc->retrying--;
 }
 
 static inline void free_config(struct game_capture_config *config)
@@ -692,11 +710,20 @@ static inline bool init_keepalive(struct game_capture *gc)
 
 static inline bool init_texture_mutexes(struct game_capture *gc)
 {
-	gc->texture_mutexes[0] = open_mutex_plus_id(gc, MUTEX_TEXTURE1);
-	gc->texture_mutexes[1] = open_mutex_plus_id(gc, MUTEX_TEXTURE2);
+	gc->texture_mutexes[0] = open_mutex_gc(gc, MUTEX_TEXTURE1);
+	gc->texture_mutexes[1] = open_mutex_gc(gc, MUTEX_TEXTURE2);
 
 	if (!gc->texture_mutexes[0] || !gc->texture_mutexes[1]) {
-		warn("failed to open texture mutexes: %lu", GetLastError());
+		DWORD error = GetLastError();
+		if (error == 2) {
+			if (!gc->retrying) {
+				gc->retrying = 2;
+				info("hook not loaded yet, retrying..");
+			}
+		} else {
+			warn("failed to open texture mutexes: %lu",
+					GetLastError());
+		}
 		return false;
 	}
 
@@ -706,7 +733,7 @@ static inline bool init_texture_mutexes(struct game_capture *gc)
 /* if there's already a hook in the process, then signal and start */
 static inline bool attempt_existing_hook(struct game_capture *gc)
 {
-	gc->hook_restart = open_event_plus_id(gc, EVENT_CAPTURE_RESTART);
+	gc->hook_restart = open_event_gc(gc, EVENT_CAPTURE_RESTART);
 	if (gc->hook_restart) {
 		debug("existing hook found, signaling process: %s",
 				gc->config.executable);
@@ -738,7 +765,7 @@ static inline void reset_frame_interval(struct game_capture *gc)
 
 static inline bool init_hook_info(struct game_capture *gc)
 {
-	gc->global_hook_info_map = open_map_plus_id(gc, SHMEM_HOOK_INFO);
+	gc->global_hook_info_map = open_hook_info(gc);
 	if (!gc->global_hook_info_map) {
 		warn("init_hook_info: get_hook_info failed: %lu",
 				GetLastError());
@@ -941,6 +968,7 @@ static const char *blacklisted_exes[] = {
 	"devenv",
 	"taskmgr",
 	"systemsettings",
+	"applicationframehost",
 	"cmd",
 	NULL
 };
@@ -1017,6 +1045,7 @@ static bool init_hook(struct game_capture *gc)
 	gc->window = gc->next_window;
 	gc->next_window = NULL;
 	gc->active = true;
+	gc->retrying = 0;
 	return true;
 }
 
@@ -1036,7 +1065,7 @@ static void setup_window(struct game_capture *gc, HWND window)
 	}
 
 	/* do not wait if we're re-hooking a process */
-	hook_restart = open_event_plus_id(gc, EVENT_CAPTURE_RESTART);
+	hook_restart = open_event_gc(gc, EVENT_CAPTURE_RESTART);
 	if (hook_restart) {
 		gc->wait_for_target_startup = false;
 		CloseHandle(hook_restart);
@@ -1156,7 +1185,7 @@ static void try_hook(struct game_capture *gc)
 static inline bool init_events(struct game_capture *gc)
 {
 	if (!gc->hook_restart) {
-		gc->hook_restart = open_event_plus_id(gc, EVENT_CAPTURE_RESTART);
+		gc->hook_restart = open_event_gc(gc, EVENT_CAPTURE_RESTART);
 		if (!gc->hook_restart) {
 			warn("init_events: failed to get hook_restart "
 			     "event: %lu", GetLastError());
@@ -1165,7 +1194,7 @@ static inline bool init_events(struct game_capture *gc)
 	}
 
 	if (!gc->hook_stop) {
-		gc->hook_stop = open_event_plus_id(gc, EVENT_CAPTURE_STOP);
+		gc->hook_stop = open_event_gc(gc, EVENT_CAPTURE_STOP);
 		if (!gc->hook_stop) {
 			warn("init_events: failed to get hook_stop event: %lu",
 					GetLastError());
@@ -1174,7 +1203,7 @@ static inline bool init_events(struct game_capture *gc)
 	}
 
 	if (!gc->hook_init) {
-		gc->hook_init = open_event_plus_id(gc, EVENT_HOOK_INIT);
+		gc->hook_init = open_event_gc(gc, EVENT_HOOK_INIT);
 		if (!gc->hook_init) {
 			warn("init_events: failed to get hook_init event: %lu",
 					GetLastError());
@@ -1183,7 +1212,7 @@ static inline bool init_events(struct game_capture *gc)
 	}
 
 	if (!gc->hook_ready) {
-		gc->hook_ready = open_event_plus_id(gc, EVENT_HOOK_READY);
+		gc->hook_ready = open_event_gc(gc, EVENT_HOOK_READY);
 		if (!gc->hook_ready) {
 			warn("init_events: failed to get hook_ready event: %lu",
 					GetLastError());
@@ -1192,7 +1221,7 @@ static inline bool init_events(struct game_capture *gc)
 	}
 
 	if (!gc->hook_exit) {
-		gc->hook_exit = open_event_plus_id(gc, EVENT_HOOK_EXIT);
+		gc->hook_exit = open_event_gc(gc, EVENT_HOOK_EXIT);
 		if (!gc->hook_exit) {
 			warn("init_events: failed to get hook_exit event: %lu",
 					GetLastError());
@@ -1211,9 +1240,6 @@ enum capture_result {
 
 static inline enum capture_result init_capture_data(struct game_capture *gc)
 {
-	char name[64];
-	sprintf(name, "%s%u", SHMEM_TEXTURE, gc->global_hook_info->map_id);
-
 	gc->cx = gc->global_hook_info->cx;
 	gc->cy = gc->global_hook_info->cy;
 	gc->pitch = gc->global_hook_info->pitch;
@@ -1225,7 +1251,8 @@ static inline enum capture_result init_capture_data(struct game_capture *gc)
 
 	CloseHandle(gc->hook_data_map);
 
-	gc->hook_data_map = OpenFileMappingA(FILE_MAP_ALL_ACCESS, false, name);
+	gc->hook_data_map = open_map_plus_id(gc, SHMEM_TEXTURE,
+			gc->global_hook_info->map_id);
 	if (!gc->hook_data_map) {
 		DWORD error = GetLastError();
 		if (error == 2) {
@@ -1523,6 +1550,8 @@ static inline bool init_shtex_capture(struct game_capture *gc)
 	gc->texture = gs_texture_open_shared(gc->shtex_data->tex_handle);
 	obs_leave_graphics();
 
+	debug("test: %llx", gc->shtex_data->tex_handle);
+
 	if (!gc->texture) {
 		warn("init_shtex_capture: failed to open shared handle");
 		return false;
@@ -1533,6 +1562,8 @@ static inline bool init_shtex_capture(struct game_capture *gc)
 
 static bool start_capture(struct game_capture *gc)
 {
+	debug("Starting capture");
+
 	if (gc->global_hook_info->type == CAPTURE_TYPE_MEMORY) {
 		if (!init_shmem_capture(gc)) {
 			return false;
@@ -1602,7 +1633,7 @@ static void game_capture_tick(void *data, float seconds)
 	}
 
 	if (gc->active && !gc->hook_ready && gc->process_id) {
-		gc->hook_ready = open_event_plus_id(gc, EVENT_HOOK_READY);
+		gc->hook_ready = open_event_gc(gc, EVENT_HOOK_READY);
 	}
 
 	if (gc->injector_process && object_signalled(gc->injector_process)) {
@@ -1622,10 +1653,13 @@ static void game_capture_tick(void *data, float seconds)
 	}
 
 	if (gc->hook_ready && object_signalled(gc->hook_ready)) {
+		debug("capture initializing!");
 		enum capture_result result = init_capture_data(gc);
 
 		if (result == CAPTURE_SUCCESS)
 			gc->capturing = start_capture(gc);
+		else
+			debug("init_capture_data failed");
 
 		if (result != CAPTURE_RETRY && !gc->capturing) {
 			gc->retry_interval = ERROR_RETRY_INTERVAL;
@@ -1677,13 +1711,17 @@ static void game_capture_tick(void *data, float seconds)
 static inline void game_capture_render_cursor(struct game_capture *gc)
 {
 	POINT p = {0};
+	HWND window;
 
-	if (!gc->global_hook_info->window ||
-	    !gc->global_hook_info->base_cx ||
+	if (!gc->global_hook_info->base_cx ||
 	    !gc->global_hook_info->base_cy)
 		return;
 
-	ClientToScreen((HWND)(uintptr_t)gc->global_hook_info->window, &p);
+	window = !!gc->global_hook_info->window
+		? (HWND)(uintptr_t)gc->global_hook_info->window
+		: gc->window;
+
+	ClientToScreen(window, &p);
 
 	float x_scale = (float)gc->global_hook_info->cx /
 		(float)gc->global_hook_info->base_cx;

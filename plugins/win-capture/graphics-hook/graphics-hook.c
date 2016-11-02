@@ -244,6 +244,7 @@ static inline bool init_hook(HANDLE thread_handle)
 	init_dummy_window_thread();
 	log_current_process();
 
+	DbgOut("Signaling restart\n");
 	SetEvent(signal_restart);
 	return true;
 }
@@ -487,10 +488,12 @@ static inline void unlock_shmem_tex(int id)
 
 static inline bool init_shared_info(size_t size)
 {
-	char name[64];
-	sprintf_s(name, 64, "%s%u", SHMEM_TEXTURE, ++shmem_id_counter);
+	wchar_t name[64];
+	_snwprintf(name, 64, L"%s%ld", SHMEM_TEXTURE, ++shmem_id_counter);
 
-	shmem_file_handle = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL,
+	hlog("%S", name);
+
+	shmem_file_handle = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL,
 			PAGE_READWRITE, 0, (DWORD)size, name);
 	if (!shmem_file_handle) {
 		hlog("init_shared_info: Failed to create shared memory: %d",
@@ -532,6 +535,7 @@ bool capture_init_shtex(struct shtex_data **data, HWND window,
 	global_hook_info->base_cx = base_cx;
 	global_hook_info->base_cy = base_cy;
 
+	DbgOut("Signaling ready (shtex)\n");
 	if (!SetEvent(signal_ready)) {
 		hlog("capture_init_shtex: Failed to signal ready: %d",
 				GetLastError());
@@ -727,6 +731,7 @@ bool capture_init_shmem(struct shmem_data **data, HWND window,
 		return false;
 	}
 
+	DbgOut("Signaling ready (shmem)\n");
 	if (!SetEvent(signal_ready)) {
 		hlog("capture_init_shmem: Failed to signal ready: %d",
 				GetLastError());
@@ -772,6 +777,7 @@ void capture_free(void)
 
 	close_handle(&shmem_file_handle);
 
+	DbgOut("Signaling restart\n");
 	SetEvent(signal_restart);
 	active = false;
 }
