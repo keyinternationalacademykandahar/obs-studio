@@ -297,6 +297,8 @@ static void stop_capture(struct game_capture *gc)
 	gc->wait_for_target_startup = false;
 	gc->active = false;
 	gc->capturing = false;
+
+	info("capture stopped");
 }
 
 static inline void free_config(struct game_capture_config *config)
@@ -1535,10 +1537,14 @@ static bool start_capture(struct game_capture *gc)
 		if (!init_shmem_capture(gc)) {
 			return false;
 		}
+
+		info("memory capture successful");
 	} else {
 		if (!init_shtex_capture(gc)) {
 			return false;
 		}
+
+		info("shared texture capture successful");
 	}
 
 	return true;
